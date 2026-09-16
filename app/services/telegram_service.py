@@ -7,6 +7,7 @@ from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from app.config import Settings
+from app.logging import invocation_logging
 from app.repositories.bot import AcceptedMessage
 from app.schemas.ai import AssistantContext, AssistantResponse, GeminiResult
 from app.schemas.media import MediaError
@@ -375,7 +376,8 @@ class TelegramService:
         response: AssistantResponse | None = None
         status, error_code = "completed", None
         try:
-            response = await self.orchestrator.respond(context)
+            with invocation_logging({**event, "model": self.settings.gemini_model}):
+                response = await self.orchestrator.respond(context)
             text = render_assistant_response(response)
             if response.error_code:
                 status, error_code = "ai_failed", response.error_code
@@ -407,6 +409,7 @@ class TelegramService:
                 "input_tokens": response.input_tokens if response else None,
                 "output_tokens": response.output_tokens if response else None,
                 "status": status,
+                "error_code": error_code,
             },
         )
         return text, status, error_code

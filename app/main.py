@@ -28,7 +28,6 @@ from app.services.gemini_gateway import GoogleGeminiGateway
 from app.services.media_service import MediaService
 from app.services.memory_service import MemoryService
 from app.services.plan_service import PlanService
-from app.services.research_router import ResearchRouter
 from app.services.summary_service import SummaryService
 from app.services.telegram_action_service import TelegramActionService
 from app.services.telegram_client import TelegramClient
@@ -93,7 +92,7 @@ def create_app(settings: Settings | None = None, service: TelegramService | None
                     ),
                     timeout_seconds=config.gemini_timeout_seconds,
                     max_output_tokens=config.max_ai_output_tokens,
-                    research_router=ResearchRouter(config.max_url_context_urls),
+                    max_url_context_urls=config.max_url_context_urls,
                     max_turns=config.max_ai_turns,
                     max_tool_calls=config.max_ai_tool_calls,
                 ),

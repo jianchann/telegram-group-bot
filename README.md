@@ -106,7 +106,7 @@ An invoked message, or its directly replied-to message, may supply one JPEG, PNG
 
 Bot answers use a safe Telegram HTML subset for headings, bold text, bullets, paragraphs, and clickable HTTP(S) URLs. Input is escaped, output is split by Telegram's UTF-16 limit without breaking tags, and an equivalent plain-text chunk is retried only when Telegram rejects formatting.
 
-The gateway uses the SDK's asynchronous `generate_content` API with ADC and an explicit project/location. It retains `generateContent` rather than migrating the application to the preview Interactions API. Research uses a staged built-in call followed by the existing application-owned function/synthesis loop because the SDK's server-side invocation-circulation flag is not supported on the enterprise backend. Recognized unsupported built-in combinations retry with one compatible tool before synthesis. Postgres owns history, memory, and plans, while provider conversation state remains invocation-local. `GeminiGateway` and `AIOrchestrator` isolate the provider details. Google's SDK documentation now calls the managed Google Cloud backend Gemini Enterprise Agent Platform; the installed SDK's enterprise configuration remains the ADC integration path. Model availability and IAM depend on the project; change `GEMINI_MODEL` if your project cannot access the configured default. [Official SDK documentation](https://googleapis.github.io/python-genai/), [tool combinations](https://ai.google.dev/gemini-api/docs/tool-combination), [Google Search](https://ai.google.dev/gemini-api/docs/google-search), [Google Maps](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/grounding/grounding-with-google-maps), [URL Context](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/url-context), [Code Execution](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/models/code-execution-api)
+The gateway uses the SDK's asynchronous `generate_content` API with ADC and an explicit project/location. It retains `generateContent` rather than migrating the application to the preview Interactions API. Research is requested through an application-owned function, runs as a separate built-in-only call, and returns to the existing function/synthesis loop because the SDK's server-side invocation-circulation flag is not supported on the enterprise backend. Each research step enables one built-in kind; provider failures are returned to Gemini for an honest, limited final answer. Postgres owns history, memory, and plans, while provider conversation state remains invocation-local. `GeminiGateway` and `AIOrchestrator` isolate the provider details. Google's SDK documentation now calls the managed Google Cloud backend Gemini Enterprise Agent Platform; the installed SDK's enterprise configuration remains the ADC integration path. Model availability and IAM depend on the project; change `GEMINI_MODEL` if your project cannot access the configured default. [Official SDK documentation](https://googleapis.github.io/python-genai/), [tool combinations](https://ai.google.dev/gemini-api/docs/tool-combination), [Google Search](https://ai.google.dev/gemini-api/docs/google-search), [Google Maps](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/grounding/grounding-with-google-maps), [URL Context](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/url-context), [Code Execution](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/models/code-execution-api)
 
 ## Shared memory
 
@@ -140,7 +140,28 @@ Ask the bot to create a poll or vote on two to ten options to send a native regu
 
 ## Grounded research
 
-On an invocation, a small deterministic router makes relevant built-in tools available and Gemini decides whether to use them. Current information can use Google Search, place and route questions can use Google Maps, supplied or saved plan links can use URL Context, and calculations can use Gemini-managed Code Execution. Passive messages never trigger research. `MAX_URL_CONTEXT_URLS=5` limits URL retrieval, prioritizing the current request, its replied-to message, then saved links on the resolved plan.
+On an AI invocation, Gemini can answer from supplied context, read missing saved state,
+or request the application-owned `research` function. Research is available regardless
+of wording; no keyword router decides eligibility. Gemini is instructed to research
+real-world recommendations and changing facts before making factual claims, while
+answering saved-state, writing, and conceptual questions from supplied information.
+This improves access to verification but does not guarantee factual accuracy.
+
+Each research request selects one kind: Google Search for web facts, Google Maps for
+places/routes, URL Context for linked content, or managed Code Execution for
+calculations. The application runs a separate built-in-only provider call and returns
+its results to the original reasoning conversation. Missing saved links can be read
+from the current chat's plan before research. URLs must come from supplied human
+context, server-checked saved artifacts, or verified grounding from this invocation;
+`MAX_URL_CONTEXT_URLS=5` caps each URL Context request.
+
+At most two actual research steps run per invocation. Identical requests reuse their
+result, including failed results. Every research function request counts toward
+`MAX_AI_TOOL_CALLS`; each provider request counts toward `MAX_AI_TURNS`. All steps
+share the invocation timeout and output-token budget, and research must leave a
+following turn for synthesis. Insufficient budget, invalid URLs, failed research,
+and missing verification evidence return failed tool results so Gemini can explain
+the limitation. Passive messages and direct database commands never trigger research.
 
 Grounded responses append only provider-returned source links. Google Maps sources are labeled `Google Maps` and immediately follow the supported answer. URL retrieval failures, unsafe pages, and paywalls are reported without claiming the page was read. Retrieved pages and search results are untrusted data and cannot authorize memory or plan mutations. Code Execution runs on Google's managed service; the application never executes generated code locally.
 
@@ -245,8 +266,8 @@ GCP_PROJECT_ID: $GCP_PROJECT_ID
 GCP_LOCATION: global
 GEMINI_MODEL: gemini-3.5-flash-lite
 ALLOWED_TELEGRAM_CHAT_IDS: '[-1001234567890]'
-MAX_AI_TURNS: '4'
-MAX_AI_TOOL_CALLS: '8'
+MAX_AI_TURNS: '6'
+MAX_AI_TOOL_CALLS: '12'
 GEMINI_TIMEOUT_SECONDS: '20'
 SUMMARY_TIMEOUT_SECONDS: '10'
 TELEGRAM_TIMEOUT_SECONDS: '10'
@@ -308,7 +329,7 @@ allows commas inside the value:
 ```bash
 gcloud run services update "$CLOUD_RUN_SERVICE" \
   --region="$CLOUD_RUN_REGION" \
-  --update-env-vars='^@^ALLOWED_TELEGRAM_CHAT_IDS=[-1001111111111,-1002222222222]'
+  --update-env-vars='^@^MAX_AI_TURNS=6@MAX_AI_TOOL_CALLS=12@ALLOWED_TELEGRAM_CHAT_IDS=[-1001111111111,-1002222222222]'
 ```
 
 No webhook update is required after an allowlist-only or ordinary code revision. If a
@@ -329,6 +350,48 @@ gcloud run revisions list \
 gcloud run services update-traffic "$CLOUD_RUN_SERVICE" \
   --region="$CLOUD_RUN_REGION" --to-revisions='PREVIOUS_REVISION=100'
 ```
+
+### Investigating tool limits
+
+Existing JSON logs now include `ai_turn_finished` for every provider attempt,
+`ai_tool_finished` for executed or skipped custom calls, and `ai_tool_limit` when
+requests exceed a tool budget. Filter by `request_id` to follow one invocation.
+`turn_number` counts both reasoning and research provider turns; `attempt_number`
+identifies each provider attempt. `tool_calls_executed` counts calls handed to an executor,
+including research requests and calls that return an error. `ai_research_requested`
+records the research kind, actual-step count, cache reuse, and rejection reason.
+`ai_tool_finished.error_code` identifies rejected or unverified requests, including
+`research_step_limit`, `research_turn_budget`, `url_not_allowed`, and
+`research_unverified`. Requested tool names are logged without
+arguments, results, messages, URLs, or prompts; unknown names appear as `unknown`.
+
+`research_eligible` lists built-ins enabled for a separate research step;
+`research_used` lists provider-reported
+usage, not exact built-in execution counts. `tools_disabled_reason` explains why
+custom functions were disabled: `research_stage`, `turn_budget`, or
+`tool_call_budget`. The latter takes precedence if both budgets are exhausted.
+`ai_tool_limit.limit_reason` distinguishes those two budgets. Check repeated tool
+names and failed outcomes before increasing limits again. `ai_finished` also
+includes the final error code.
+
+Deploy these code changes yourself from the project directory (no database migration
+is required). Use your existing service and region; this builds a new image and
+retains existing environment variables and secret mappings:
+
+```bash
+gcloud run deploy "$CLOUD_RUN_SERVICE" \
+  --project="$GCP_PROJECT_ID" \
+  --source=. \
+  --region="$CLOUD_RUN_REGION"
+gcloud run revisions list \
+  --service="$CLOUD_RUN_SERVICE" --region="$CLOUD_RUN_REGION"
+```
+
+Confirm the new revision is ready and receiving traffic in Cloud Run, then send a
+fresh Telegram invocation and inspect its events in Logs Explorer. Keep your
+current limit values, including in any deployment environment YAML you reuse.
+The stable service URL and webhook secret are unchanged, so leave the webhook
+registration in place. No Docker commands are required for this source deployment.
 
 To rotate the webhook secret, add a new Secret Manager version, update the Cloud Run
 secret mapping to that explicit version, verify the revision is healthy, and rerun

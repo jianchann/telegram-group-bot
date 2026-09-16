@@ -2,7 +2,25 @@
 
 import json
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
+
+_invocation: ContextVar[dict[str, object] | None] = ContextVar("log_invocation", default=None)
+
+
+@contextmanager
+def invocation_logging(fields: dict[str, object]) -> Iterator[None]:
+    token = _invocation.set(fields)
+    try:
+        yield
+    finally:
+        _invocation.reset(token)
+
+
+def log_ai_event(logger: logging.Logger, event: str, **fields: object) -> None:
+    logger.info(event, extra={**(_invocation.get() or {}), **fields})
 
 
 class JSONFormatter(logging.Formatter):
@@ -23,6 +41,24 @@ class JSONFormatter(logging.Formatter):
             "status",
             "error_code",
             "error_type",
+            "stage",
+            "turn_number",
+            "attempt_number",
+            "max_turns",
+            "max_tool_calls",
+            "tool_calls_executed",
+            "allow_tools",
+            "has_answer",
+            "tool_names",
+            "tool_name",
+            "rejection_reason",
+            "research_kind",
+            "cache_reused",
+            "research_steps",
+            "research_eligible",
+            "research_used",
+            "limit_reason",
+            "tools_disabled_reason",
         ):
             if hasattr(record, key):
                 event[key] = getattr(record, key)
